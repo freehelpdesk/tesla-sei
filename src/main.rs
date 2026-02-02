@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use tesla_sei::extract;
 use tesla_sei::pb;
+use tesla_sei::Error;
 
 #[derive(Debug, Serialize)]
 struct Sei {
@@ -163,7 +164,7 @@ fn run_with_writer(
     format: OutputFormat,
     enum_strings: bool,
     out: &mut dyn Write,
-) -> io::Result<()> {
+) -> Result<(), Error> {
     let extractor = extract::extractor_from_path(input)?;
 
     let mut results: Vec<Sei> = Vec::new();
@@ -222,7 +223,7 @@ fn run_with_writer(
     Ok(())
 }
 
-fn main() -> io::Result<()> {
+fn main() -> Result<(), Error> {
     let cli = Cli::parse();
     let format = resolve_format(&cli);
 

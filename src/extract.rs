@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::mp4::{build_sample_offsets, parse_mp4, CodecConfig, TrackSampleTables};
 use crate::pb;
 use crate::sei::decode_sei_from_sample;
+use crate::Error;
 
 /// A single decoded SEI telemetry event.
 ///
@@ -24,7 +25,7 @@ pub struct SeiEvent {
 /// Streaming extractor that yields per-sample/per-frame telemetry as it is decoded.
 ///
 /// This type is synchronous and requires a seekable input (`Read + Seek`). It implements
-/// `Iterator<Item = io::Result<SeiEvent>>`.
+/// `Iterator<Item = Result<SeiEvent, Error>>`.
 pub struct SeiExtractor<R: Read + Seek> {
     reader: R,
     sample_sizes: Vec<u32>,
@@ -38,7 +39,7 @@ pub struct SeiExtractor<R: Read + Seek> {
 }
 
 /// Create an extractor from an on-disk MP4 path.
-pub fn extractor_from_path(path: impl AsRef<Path>) -> io::Result<SeiExtractor<File>> {
+pub fn extractor_from_path(path: impl AsRef<Path>) -> Result<SeiExtractor<File>, Error> {
     let file = File::open(path)?;
     extractor_from_reader(file)
 }
@@ -46,14 +47,11 @@ pub fn extractor_from_path(path: impl AsRef<Path>) -> io::Result<SeiExtractor<Fi
 /// Create an extractor from any seekable reader.
 ///
 /// This is the most flexible entry point for integrating into other Rust projects.
-pub fn extractor_from_reader<R: Read + Seek>(mut reader: R) -> io::Result<SeiExtractor<R>> {
+pub fn extractor_from_reader<R: Read + Seek>(mut reader: R) -> Result<SeiExtractor<R>, Error> {
     let mp4 = parse_mp4(&mut reader)?;
 
     if mp4.tracks.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "no video tracks with sample tables found",
-        ));
+        return Err(Error::NoTracksFound);
     }
 
     // Tesla clips sometimes contain multiple video tracks (e.g., a tiny preview track).
@@ -86,11 +84,11 @@ impl<R: Read + Seek> SeiExtractor<R> {
     }
 
     /// Pull the next event (convenience wrapper around `Iterator::next`).
-    pub fn next_event(&mut self) -> io::Result<Option<SeiEvent>> {
+    pub fn next_event(&mut self) -> Result<Option<SeiEvent>, Error> {
         self.next().transpose()
     }
 
-    fn read_next_sample_into_pending(&mut self) -> io::Result<bool> {
+    fn read_next_sample_into_pending(&mut self) -> Result<bool, Error> {
         while self.pending.is_empty() && self.next_sample_index < self.sample_offsets.len() {
             let sample_index = self.next_sample_index;
             let off = self.sample_offsets[sample_index];
@@ -118,7 +116,7 @@ impl<R: Read + Seek> SeiExtractor<R> {
 }
 
 impl<R: Read + Seek> Iterator for SeiExtractor<R> {
-    type Item = io::Result<SeiEvent>;
+    type Item = Result<SeiEvent, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Err(e) = self.read_next_sample_into_pending() {
@@ -139,8 +137,8 @@ impl<R: Read + Seek> Iterator for SeiExtractor<R> {
 /// This can be more ergonomic than manually writing a `for` loop when integrating in apps.
 pub fn for_each_sei_metadata<R: Read + Seek>(
     reader: R,
-    mut f: impl FnMut(SeiEvent) -> io::Result<()>,
-) -> io::Result<()> {
+    mut f: impl FnMut(SeiEvent) -> Result<(), Error>,
+) -> Result<(), Error> {
     let mut extractor = extractor_from_reader(reader)?;
     for event in &mut extractor {
         f(event?)?;

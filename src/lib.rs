@@ -20,6 +20,8 @@ pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/dashcam.rs"));
 }
 
+pub mod error;
+
 mod mp4;
 mod sei;
 
@@ -31,6 +33,8 @@ pub mod async_extract;
 pub use extract::{
     extractor_from_path, extractor_from_reader, for_each_sei_metadata, SeiEvent, SeiExtractor,
 };
+
+pub use error::Error;
 
 #[cfg(feature = "async")]
 pub use async_extract::{stream_from_path, stream_from_reader};

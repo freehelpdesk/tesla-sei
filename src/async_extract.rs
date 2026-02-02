@@ -1,6 +1,5 @@
 #![cfg(feature = "async")]
 
-use std::io;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
 
@@ -8,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::extract::{extractor_from_path, extractor_from_reader, SeiEvent};
+use crate::Error;
 
 /// Create a Tokio `Stream` of per-sample/per-frame SEI events from an MP4 file on disk.
 ///
@@ -22,7 +22,7 @@ use crate::extract::{extractor_from_path, extractor_from_reader, SeiEvent};
 pub fn stream_from_path(
     path: impl Into<PathBuf>,
     buffer: usize,
-) -> ReceiverStream<io::Result<SeiEvent>> {
+) -> ReceiverStream<Result<SeiEvent, Error>> {
     let path = path.into();
     let (tx, rx) = mpsc::channel(buffer.max(1));
 
@@ -50,7 +50,7 @@ pub fn stream_from_path(
 /// This is useful for integration into other Rust projects that already manage IO.
 ///
 /// The reader must be `Send + 'static` because extraction runs in `spawn_blocking`.
-pub fn stream_from_reader<R>(reader: R, buffer: usize) -> ReceiverStream<io::Result<SeiEvent>>
+pub fn stream_from_reader<R>(reader: R, buffer: usize) -> ReceiverStream<Result<SeiEvent, Error>>
 where
     R: Read + Seek + Send + 'static,
 {
