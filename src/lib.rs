@@ -9,9 +9,11 @@
 //! ## Quick start (sync)
 //! - Open a file and iterate decoded events:
 //!   - Use [`extractor_from_path`] and iterate the returned [`SeiExtractor`].
+//! - For GUI scrubbing, use [`SeiExtractor::read_sample_events`] or [`SeiExtractor::seek_sample`].
 //!
 //! ## Quick start (async)
 //! - Use [`stream_from_path`] to get a Tokio `Stream` of events.
+//! - To start from a scrubbed position, use [`stream_from_path_from_sample`].
 //!
 //! ## Features
 //! - `async` (default): enables Tokio stream helpers.
@@ -37,4 +39,6 @@ pub use extract::{
 pub use error::Error;
 
 #[cfg(feature = "async")]
-pub use async_extract::{stream_from_path, stream_from_reader};
+pub use async_extract::{
+    stream_from_path, stream_from_path_from_sample, stream_from_reader, stream_from_reader_from_sample,
+};

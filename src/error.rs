@@ -34,4 +34,11 @@ pub enum Error {
         sample_offsets: usize,
         chunk_offsets: usize,
     },
+
+    /// Requested sample index is outside the available range.
+    #[error("sample index out of range: {sample_index} (total_samples={total_samples})")]
+    SampleIndexOutOfRange {
+        sample_index: usize,
+        total_samples: usize,
+    },
 }

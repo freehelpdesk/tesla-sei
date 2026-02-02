@@ -88,6 +88,59 @@ impl<R: Read + Seek> SeiExtractor<R> {
         self.next().transpose()
     }
 
+    /// Seek the extractor so the next decoded events come from `sample_index`.
+    ///
+    /// This is useful for GUI "scrubbing" where you want to jump to an arbitrary point and
+    /// then iterate forward.
+    pub fn seek_sample(&mut self, sample_index: usize) -> Result<(), Error> {
+        // Allow seeking to exactly `total_samples()` to position at EOF (iterator will return None).
+        if sample_index > self.sample_offsets.len() {
+            return Err(Error::SampleIndexOutOfRange {
+                sample_index,
+                total_samples: self.sample_offsets.len(),
+            });
+        }
+
+        self.next_sample_index = sample_index;
+        self.pending.clear();
+        self.pending_offset = 0;
+        self.pending_sample_index = 0;
+        Ok(())
+    }
+
+    /// Decode telemetry events for an arbitrary `sample_index` without changing the iterator
+    /// cursor.
+    ///
+    /// This is typically the most convenient API for GUI scrubbing: call this as the user drags
+    /// a slider, and render the returned metadata.
+    pub fn read_sample_events(&mut self, sample_index: usize) -> Result<Vec<SeiEvent>, Error> {
+        let total = self.sample_offsets.len();
+        if sample_index >= total {
+            return Err(Error::SampleIndexOutOfRange {
+                sample_index,
+                total_samples: total,
+            });
+        }
+
+        let off = self.sample_offsets[sample_index];
+        let sz = self.sample_sizes[sample_index] as usize;
+        let mut buf = vec![0u8; sz];
+        self.reader.seek(SeekFrom::Start(off))?;
+        self.reader.read_exact(&mut buf)?;
+
+        let decoded = decode_sei_from_sample(&self.codec, &buf);
+        let events = decoded
+            .into_iter()
+            .map(|metadata| SeiEvent {
+                sample_index,
+                file_offset: off,
+                metadata,
+            })
+            .collect();
+
+        Ok(events)
+    }
+
     fn read_next_sample_into_pending(&mut self) -> Result<bool, Error> {
         while self.pending.is_empty() && self.next_sample_index < self.sample_offsets.len() {
             let sample_index = self.next_sample_index;
