@@ -1,6 +1,8 @@
 use std::env;
 use std::io::{self, Read, Seek, SeekFrom};
 
+use crate::Error;
+
 // -----------------------------
 // MP4 parsing (minimal ISO-BMFF)
 // -----------------------------
@@ -113,23 +115,19 @@ fn trace_box(ctx: &str, start: u64, hdr: &BoxHeader, limit: u64) {
     }
 }
 
-fn safe_box_end(start: u64, hdr: &BoxHeader, limit: u64) -> io::Result<u64> {
+fn safe_box_end(ctx: &str, start: u64, hdr: &BoxHeader, limit: u64) -> Result<u64, Error> {
     // ISO-BMFF: size==0 means "extends to end of file" (or end of the containing box).
     let mut size = hdr.size;
     if size == 0 {
         size = limit.saturating_sub(start);
     }
     if size < hdr.header_len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "invalid box {} at {}: size {} < header_len {}",
-                fourcc_to_string(hdr.typ),
-                start,
-                size,
-                hdr.header_len
-            ),
-        ));
+        return Err(Error::Mp4InvalidBox {
+            context: ctx.to_string(),
+            box_type: fourcc_to_string(hdr.typ),
+            offset: start,
+            message: format!("size {size} < header_len {}", hdr.header_len),
+        });
     }
 
     let mut end = start.saturating_add(size);
@@ -141,21 +139,18 @@ fn safe_box_end(start: u64, hdr: &BoxHeader, limit: u64) -> io::Result<u64> {
 
     // Guarantee forward progress.
     if end <= start {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "invalid box {} at {}: non-advancing end {}",
-                fourcc_to_string(hdr.typ),
-                start,
-                end
-            ),
-        ));
+        return Err(Error::Mp4InvalidBox {
+            context: ctx.to_string(),
+            box_type: fourcc_to_string(hdr.typ),
+            offset: start,
+            message: format!("non-advancing end {end}"),
+        });
     }
 
     Ok(end)
 }
 
-pub(crate) fn parse_mp4<R: Read + Seek>(f: &mut R) -> io::Result<Mp4> {
+pub(crate) fn parse_mp4<R: Read + Seek>(f: &mut R) -> Result<Mp4, Error> {
     let mut tracks: Vec<TrackSampleTables> = Vec::new();
 
     let file_len = f.seek(SeekFrom::End(0))?;
@@ -167,7 +162,7 @@ pub(crate) fn parse_mp4<R: Read + Seek>(f: &mut R) -> io::Result<Mp4> {
         let hdr = read_box_header(f)?;
         let start = pos;
         trace_box("top", start, &hdr, file_len);
-        let end = safe_box_end(start, &hdr, file_len)?;
+        let end = safe_box_end("top", start, &hdr, file_len)?;
         let payload_start = start + hdr.header_len;
 
         if hdr.typ == fourcc("moov") {
@@ -186,13 +181,13 @@ fn parse_moov<R: Read + Seek>(
     mut pos: u64,
     end: u64,
     tracks: &mut Vec<TrackSampleTables>,
-) -> io::Result<()> {
+) -> Result<(), Error> {
     while pos + 8 <= end {
         f.seek(SeekFrom::Start(pos))?;
         let hdr = read_box_header(f)?;
         let start = pos;
         trace_box("moov", start, &hdr, end);
-        let box_end = safe_box_end(start, &hdr, end)?;
+        let box_end = safe_box_end("moov", start, &hdr, end)?;
         let payload_start = start + hdr.header_len;
 
         if hdr.typ == fourcc("trak") {
@@ -206,14 +201,18 @@ fn parse_moov<R: Read + Seek>(
     Ok(())
 }
 
-fn parse_trak<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<Option<TrackSampleTables>> {
+fn parse_trak<R: Read + Seek>(
+    f: &mut R,
+    mut pos: u64,
+    end: u64,
+) -> Result<Option<TrackSampleTables>, Error> {
     // We only care about video tracks. We'll detect by presence of stsd avc1/hvc1/etc.
     while pos + 8 <= end {
         f.seek(SeekFrom::Start(pos))?;
         let hdr = read_box_header(f)?;
         let start = pos;
         trace_box("trak", start, &hdr, end);
-        let box_end = safe_box_end(start, &hdr, end)?;
+        let box_end = safe_box_end("trak", start, &hdr, end)?;
         let payload_start = start + hdr.header_len;
 
         if hdr.typ == fourcc("mdia") {
@@ -225,16 +224,17 @@ fn parse_trak<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<O
     Ok(None)
 }
 
-fn parse_mdia<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<Option<TrackSampleTables>> {
+fn parse_mdia<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> Result<Option<TrackSampleTables>, Error> {
     let mut handler_type: Option<[u8; 4]> = None;
     let mut stbl_tables: Option<TrackSampleTables> = None;
+    let mut minf_err: Option<Error> = None;
 
     while pos + 8 <= end {
         f.seek(SeekFrom::Start(pos))?;
         let hdr = read_box_header(f)?;
         let start = pos;
         trace_box("mdia", start, &hdr, end);
-        let box_end = safe_box_end(start, &hdr, end)?;
+        let box_end = safe_box_end("mdia", start, &hdr, end)?;
         let payload_start = start + hdr.header_len;
 
         match hdr.typ {
@@ -246,7 +246,10 @@ fn parse_mdia<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<O
                 handler_type = Some(ht);
             }
             t if t == fourcc("minf") => {
-                stbl_tables = parse_minf(f, payload_start, box_end)?;
+                match parse_minf(f, payload_start, box_end) {
+                    Ok(v) => stbl_tables = v,
+                    Err(e) => minf_err = Some(e),
+                }
             }
             _ => {}
         }
@@ -256,23 +259,26 @@ fn parse_mdia<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<O
 
     // Keep only video handler 'vide'
     if handler_type == Some(fourcc("vide")) {
+        if let Some(e) = minf_err {
+            return Err(e);
+        }
         Ok(stbl_tables)
     } else {
         Ok(None)
     }
 }
 
-fn parse_minf<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<Option<TrackSampleTables>> {
+fn parse_minf<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> Result<Option<TrackSampleTables>, Error> {
     while pos + 8 <= end {
         f.seek(SeekFrom::Start(pos))?;
         let hdr = read_box_header(f)?;
         let start = pos;
         trace_box("minf", start, &hdr, end);
-        let box_end = safe_box_end(start, &hdr, end)?;
+        let box_end = safe_box_end("minf", start, &hdr, end)?;
         let payload_start = start + hdr.header_len;
 
         if hdr.typ == fourcc("stbl") {
-            return parse_stbl(f, payload_start, box_end);
+            return parse_stbl(f, payload_start, box_end).map(Some);
         }
 
         pos = box_end;
@@ -280,7 +286,7 @@ fn parse_minf<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<O
     Ok(None)
 }
 
-fn parse_stbl<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<Option<TrackSampleTables>> {
+fn parse_stbl<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> Result<TrackSampleTables, Error> {
     let mut sample_sizes: Option<Vec<u32>> = None;
     let mut chunk_offsets: Option<Vec<u64>> = None;
     let mut stsc: Option<Vec<StscEntry>> = None;
@@ -291,7 +297,7 @@ fn parse_stbl<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<O
         let hdr = read_box_header(f)?;
         let start = pos;
         trace_box("stbl", start, &hdr, end);
-        let box_end = safe_box_end(start, &hdr, end)?;
+        let box_end = safe_box_end("stbl", start, &hdr, end)?;
         let payload_start = start + hdr.header_len;
 
         match hdr.typ {
@@ -316,17 +322,29 @@ fn parse_stbl<R: Read + Seek>(f: &mut R, mut pos: u64, end: u64) -> io::Result<O
         pos = box_end;
     }
 
-    let (sample_sizes, chunk_offsets, stsc) = match (sample_sizes, chunk_offsets, stsc) {
-        (Some(a), Some(b), Some(c)) => (a, b, c),
-        _ => return Ok(None),
-    };
+    let mut missing: Vec<&'static str> = Vec::new();
+    if sample_sizes.is_none() {
+        missing.push("stsz");
+    }
+    if chunk_offsets.is_none() {
+        missing.push("stco/co64");
+    }
+    if stsc.is_none() {
+        missing.push("stsc");
+    }
 
-    Ok(Some(TrackSampleTables {
-        sample_sizes,
-        chunk_offsets,
-        stsc,
+    if !missing.is_empty() {
+        return Err(Error::Mp4MissingSampleTables {
+            missing: missing.join(", "),
+        });
+    }
+
+    Ok(TrackSampleTables {
+        sample_sizes: sample_sizes.unwrap(),
+        chunk_offsets: chunk_offsets.unwrap(),
+        stsc: stsc.unwrap(),
         codec,
-    }))
+    })
 }
 
 fn parse_stsz<R: Read + Seek>(f: &mut R, payload_start: u64) -> io::Result<Vec<u32>> {
@@ -388,7 +406,7 @@ fn parse_stsd_for_codec<R: Read + Seek>(
     f: &mut R,
     payload_start: u64,
     stsd_end: u64,
-) -> io::Result<CodecConfig> {
+) -> Result<CodecConfig, Error> {
     // stsd: version/flags (4) + entry_count (4) + sample entries...
     f.seek(SeekFrom::Start(payload_start))?;
     let _version_flags = read_be_u32(f)?;
@@ -432,7 +450,7 @@ fn parse_stsd_for_codec<R: Read + Seek>(
         let hdr = read_box_header(f)?;
         let start = p;
         // Child boxes can also legally be size==0; treat as extending to end of sample entry.
-        let child_end = safe_box_end(start, &hdr, entry_end)?;
+        let child_end = safe_box_end("stsd", start, &hdr, entry_end)?;
         let payload = start + hdr.header_len;
 
         if hdr.typ == fourcc("avcC") {
@@ -480,7 +498,7 @@ fn parse_hvcc_nal_len<R: Read + Seek>(f: &mut R, payload_start: u64) -> io::Resu
 }
 
 // Turn stsc + stco + stsz into per-sample absolute file offsets.
-pub(crate) fn build_sample_offsets(t: &TrackSampleTables) -> Vec<u64> {
+pub(crate) fn build_sample_offsets(t: &TrackSampleTables) -> Result<Vec<u64>, Error> {
     // Expand chunk -> samples_per_chunk using stsc runs.
     // MP4 chunks are 1-based in stsc.
     let mut chunk_samples: Vec<u32> = vec![0; t.chunk_offsets.len()];
@@ -530,5 +548,13 @@ pub(crate) fn build_sample_offsets(t: &TrackSampleTables) -> Vec<u64> {
         }
     }
 
-    sample_offsets
+    if sample_offsets.len() != t.sample_sizes.len() {
+        return Err(Error::Mp4InconsistentSampleTables {
+            sample_sizes: t.sample_sizes.len(),
+            sample_offsets: sample_offsets.len(),
+            chunk_offsets: t.chunk_offsets.len(),
+        });
+    }
+
+    Ok(sample_offsets)
 }

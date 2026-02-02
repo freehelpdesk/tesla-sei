@@ -63,7 +63,7 @@ pub fn extractor_from_reader<R: Read + Seek>(mut reader: R) -> Result<SeiExtract
         .max_by_key(|(_, t)| t.sample_sizes.len())
         .unwrap();
 
-    let sample_offsets = build_sample_offsets(track);
+    let sample_offsets = build_sample_offsets(track)?;
 
     Ok(SeiExtractor {
         reader,
